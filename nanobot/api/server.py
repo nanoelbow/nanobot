@@ -94,7 +94,12 @@ async def handle_chat_completions(request: web.Request) -> web.Response:
     if (requested_model := body.get("model")) and requested_model != model_name:
         return _error_json(400, f"Only configured model '{model_name}' is available")
 
-    session_key = f"api:{body['session_id']}" if body.get("session_id") else API_SESSION_KEY
+    # If raw_session=true, use session_id as-is (for CLI bridge to gateway sessions)
+    raw = body.get("raw_session", False)
+    if body.get("session_id"):
+        session_key = body["session_id"] if raw else f"api:{body['session_id']}"
+    else:
+        session_key = API_SESSION_KEY
     session_locks: dict[str, asyncio.Lock] = request.app["session_locks"]
     session_lock = session_locks.setdefault(session_key, asyncio.Lock())
 

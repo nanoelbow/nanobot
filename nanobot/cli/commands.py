@@ -830,10 +830,21 @@ def gateway(
     ))
     console.print(f"[green]✓[/green] Dream: {dream_cfg.describe_schedule()}")
 
+    # Start API server alongside gateway for local CLI bridge
+    from nanobot.api.server import create_app
+    api_app = create_app(agent, model_name=config.agents.defaults.model)
+    api_port = config.gateway.port + 1
+
     async def run():
+        from aiohttp import web
         try:
             await cron.start()
             await heartbeat.start()
+            runner = web.AppRunner(api_app)
+            await runner.setup()
+            site = web.TCPSite(runner, "127.0.0.1", api_port)
+            await site.start()
+            console.print(f"[green]✓[/green] API bridge: http://127.0.0.1:{api_port}")
             await asyncio.gather(
                 agent.run(),
                 channels.start_all(),
@@ -846,6 +857,10 @@ def gateway(
             console.print("\n[red]Error: Gateway crashed unexpectedly[/red]")
             console.print(traceback.format_exc())
         finally:
+            try:
+                await runner.cleanup()
+            except Exception:
+                pass
             await agent.close_mcp()
             heartbeat.stop()
             cron.stop()
@@ -853,6 +868,57 @@ def gateway(
             await channels.stop_all()
 
     asyncio.run(run())
+
+
+@app.command()
+def chat(
+    message: str = typer.Argument(None, help="Message to send (interactive if omitted)"),
+    session: str = typer.Option("telegram:8402482802", "--session", "-s", help="Session key (channel:chat_id)"),
+    port: int = typer.Option(18791, "--port", "-p", help="Gateway API bridge port"),
+    markdown: bool = typer.Option(True, "--markdown/--no-markdown", help="Render as Markdown"),
+):
+    """Chat with the running gateway agent (uses same session as gateway channels)."""
+    import httpx
+    base_url = f"http://127.0.0.1:{port}"
+
+    def send(msg: str) -> str:
+        try:
+            r = httpx.post(f"{base_url}/v1/chat/completions", json={
+                "messages": [{"role": "user", "content": msg}],
+                "session_id": session,
+                "raw_session": True,
+            }, timeout=300)
+            if r.status_code != 200:
+                return f"Error: {r.status_code} — {r.text}"
+            return r.json()["choices"][0]["message"]["content"]
+        except httpx.ConnectError:
+            return "Error: Cannot connect to gateway API. Is `nanobot gateway` running?"
+
+    if message:
+        response = send(message)
+        if markdown:
+            console.print(Markdown(response))
+        else:
+            console.print(response)
+        return
+
+    # Interactive mode
+    console.print(f"[dim]Connected to gateway (session: {session}). Ctrl+C to exit.[/dim]")
+    while True:
+        try:
+            user_input = console.input("[bold green]>[/bold green] ").strip()
+            if not user_input:
+                continue
+            if user_input.lower() in {"exit", "quit", "/q"}:
+                break
+            response = send(user_input)
+            if markdown:
+                console.print(Markdown(response))
+            else:
+                console.print(response)
+        except (KeyboardInterrupt, EOFError):
+            console.print("\n[dim]Bye.[/dim]")
+            break
 
 
 # ============================================================================
