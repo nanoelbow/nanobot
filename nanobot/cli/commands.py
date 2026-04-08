@@ -832,8 +832,8 @@ def gateway(
 
     # Start API server alongside gateway for local CLI bridge
     from nanobot.api.server import create_app
-    api_app = create_app(agent, model_name=config.agents.defaults.model)
     api_port = config.gateway.port + 1
+    api_app = create_app(agent, model_name=config.agents.defaults.model, bus=bus)
 
     async def run():
         from aiohttp import web

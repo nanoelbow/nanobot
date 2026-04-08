@@ -111,7 +111,7 @@ async def handle_chat_completions(request: web.Request) -> web.Response:
     else:
         channel, chat_id = "api", API_CHAT_ID
 
-    logger.info("API request session_key={} channel={} content={}", session_key, channel, user_content[:80])
+    logger.info("API request session_key={} channel={} raw={} content={}", session_key, channel, raw, user_content[:80])
 
     _FALLBACK = EMPTY_FINAL_RESPONSE_MESSAGE
 
@@ -150,6 +150,21 @@ async def handle_chat_completions(request: web.Request) -> web.Response:
                             session_key,
                         )
                         response_text = _FALLBACK
+
+                # Mirror the response to the bus so the channel manager delivers
+                # it to the original channel (e.g. Telegram) alongside the HTTP response.
+                if raw and response:
+                    bus = request.app.get("bus")
+                    if bus:
+                        from nanobot.bus.events import OutboundMessage
+                        outbound = OutboundMessage(
+                            channel=channel,
+                            chat_id=chat_id,
+                            content=response_text or "",
+                            metadata=response.metadata if hasattr(response, "metadata") else {},
+                        )
+                        await bus.publish_outbound(outbound)
+                        logger.info("Mirrored response to bus for channel={}", channel)
 
             except asyncio.TimeoutError:
                 return _error_json(504, f"Request timed out after {timeout_s}s")
@@ -190,7 +205,7 @@ async def handle_session_history(request: web.Request) -> web.Response:
     session_key = request.match_info["key"].replace("_", ":", 1)
     max_messages = int(request.query.get("max_messages", "50"))
 
-    session = agent_loop.session_manager.get_or_create(session_key)
+    session = agent_loop.sessions.get_or_create(session_key)
     history = session.get_history(max_messages=max_messages)
 
     # Filter to just user/assistant text messages for display
@@ -211,7 +226,7 @@ async def handle_session_history(request: web.Request) -> web.Response:
 async def handle_list_sessions(request: web.Request) -> web.Response:
     """GET /v1/sessions — list all sessions."""
     agent_loop = request.app["agent_loop"]
-    sessions = agent_loop.session_manager.list_sessions()
+    sessions = agent_loop.sessions.list_sessions()
     return web.json_response({"sessions": sessions})
 
 
@@ -219,19 +234,22 @@ async def handle_list_sessions(request: web.Request) -> web.Response:
 # App factory
 # ---------------------------------------------------------------------------
 
-def create_app(agent_loop, model_name: str = "nanobot", request_timeout: float = 120.0) -> web.Application:
+def create_app(agent_loop, model_name: str = "nanobot", request_timeout: float = 120.0, bus=None) -> web.Application:
     """Create the aiohttp application.
 
     Args:
         agent_loop: An initialized AgentLoop instance.
         model_name: Model name reported in responses.
         request_timeout: Per-request timeout in seconds.
+        bus: Optional MessageBus for mirroring outbound responses to channels.
     """
     app = web.Application()
     app["agent_loop"] = agent_loop
     app["model_name"] = model_name
     app["request_timeout"] = request_timeout
     app["session_locks"] = {}  # per-user locks, keyed by session_key
+    if bus:
+        app["bus"] = bus
 
     app.router.add_post("/v1/chat/completions", handle_chat_completions)
     app.router.add_get("/v1/models", handle_models)
