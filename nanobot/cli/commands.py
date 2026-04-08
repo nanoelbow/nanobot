@@ -876,10 +876,28 @@ def chat(
     session: str = typer.Option("telegram:8402482802", "--session", "-s", help="Session key (channel:chat_id)"),
     port: int = typer.Option(18791, "--port", "-p", help="Gateway API bridge port"),
     markdown: bool = typer.Option(True, "--markdown/--no-markdown", help="Render as Markdown"),
+    history: int = typer.Option(20, "--history", "-n", help="Number of history messages to show on connect (0=none)"),
 ):
     """Chat with the running gateway agent (uses same session as gateway channels)."""
     import httpx
     base_url = f"http://127.0.0.1:{port}"
+
+    def _check_connection() -> bool:
+        try:
+            r = httpx.get(f"{base_url}/health", timeout=5)
+            return r.status_code == 200
+        except httpx.ConnectError:
+            return False
+
+    def _fetch_history(n: int = 20) -> list[dict]:
+        try:
+            safe_key = session.replace(":", "_", 1)
+            r = httpx.get(f"{base_url}/v1/sessions/{safe_key}/history", params={"max_messages": n}, timeout=10)
+            if r.status_code == 200:
+                return r.json().get("messages", [])
+        except Exception:
+            pass
+        return []
 
     def send(msg: str) -> str:
         try:
@@ -894,6 +912,10 @@ def chat(
         except httpx.ConnectError:
             return "Error: Cannot connect to gateway API. Is `nanobot gateway` running?"
 
+    if not _check_connection():
+        console.print("[red]Error: Cannot connect to gateway API. Is `nanobot gateway` running?[/red]")
+        raise typer.Exit(1)
+
     if message:
         response = send(message)
         if markdown:
@@ -903,7 +925,30 @@ def chat(
         return
 
     # Interactive mode
-    console.print(f"[dim]Connected to gateway (session: {session}). Ctrl+C to exit.[/dim]")
+    console.print(f"[bold]nanobot chat[/bold] — session: [cyan]{session}[/cyan]")
+
+    # Show recent history
+    if history > 0:
+        msgs = _fetch_history(history)
+        if msgs:
+            console.print(f"[dim]── Last {len(msgs)} messages ──[/dim]")
+            for msg in msgs:
+                role = msg["role"]
+                content = msg["content"]
+                if role == "user":
+                    console.print(f"[bold green]>[/bold green] {content[:200]}{'...' if len(content) > 200 else ''}")
+                else:
+                    preview = content[:300] + ("..." if len(content) > 300 else "")
+                    if markdown:
+                        console.print(Markdown(preview))
+                    else:
+                        console.print(preview)
+            console.print(f"[dim]── End of history ──[/dim]")
+        else:
+            console.print("[dim]No history for this session.[/dim]")
+
+    console.print(f"[dim]Type a message or /q to exit.[/dim]")
+
     while True:
         try:
             user_input = console.input("[bold green]>[/bold green] ").strip()

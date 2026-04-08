@@ -103,7 +103,15 @@ async def handle_chat_completions(request: web.Request) -> web.Response:
     session_locks: dict[str, asyncio.Lock] = request.app["session_locks"]
     session_lock = session_locks.setdefault(session_key, asyncio.Lock())
 
-    logger.info("API request session_key={} content={}", session_key, user_content[:80])
+    # Derive channel/chat_id from session_key when raw_session=true
+    # e.g. "telegram:8402482802" → channel="telegram", chat_id="8402482802"
+    if raw and ":" in session_key:
+        parts = session_key.split(":", 1)
+        channel, chat_id = parts[0], parts[1]
+    else:
+        channel, chat_id = "api", API_CHAT_ID
+
+    logger.info("API request session_key={} channel={} content={}", session_key, channel, user_content[:80])
 
     _FALLBACK = EMPTY_FINAL_RESPONSE_MESSAGE
 
@@ -114,8 +122,8 @@ async def handle_chat_completions(request: web.Request) -> web.Response:
                     agent_loop.process_direct(
                         content=user_content,
                         session_key=session_key,
-                        channel="api",
-                        chat_id=API_CHAT_ID,
+                        channel=channel,
+                        chat_id=chat_id,
                     ),
                     timeout=timeout_s,
                 )
@@ -130,8 +138,8 @@ async def handle_chat_completions(request: web.Request) -> web.Response:
                         agent_loop.process_direct(
                             content=user_content,
                             session_key=session_key,
-                            channel="api",
-                            chat_id=API_CHAT_ID,
+                            channel=channel,
+                            chat_id=chat_id,
                         ),
                         timeout=timeout_s,
                     )
@@ -176,6 +184,37 @@ async def handle_health(request: web.Request) -> web.Response:
     return web.json_response({"status": "ok"})
 
 
+async def handle_session_history(request: web.Request) -> web.Response:
+    """GET /v1/sessions/{key}/history — return recent messages for a session."""
+    agent_loop = request.app["agent_loop"]
+    session_key = request.match_info["key"].replace("_", ":", 1)
+    max_messages = int(request.query.get("max_messages", "50"))
+
+    session = agent_loop.session_manager.get_or_create(session_key)
+    history = session.get_history(max_messages=max_messages)
+
+    # Filter to just user/assistant text messages for display
+    display = []
+    for msg in history:
+        role = msg.get("role", "")
+        content = msg.get("content", "")
+        if role in ("user", "assistant") and content:
+            display.append({"role": role, "content": content})
+
+    return web.json_response({
+        "session_key": session_key,
+        "messages": display,
+        "total": len(display),
+    })
+
+
+async def handle_list_sessions(request: web.Request) -> web.Response:
+    """GET /v1/sessions — list all sessions."""
+    agent_loop = request.app["agent_loop"]
+    sessions = agent_loop.session_manager.list_sessions()
+    return web.json_response({"sessions": sessions})
+
+
 # ---------------------------------------------------------------------------
 # App factory
 # ---------------------------------------------------------------------------
@@ -196,5 +235,7 @@ def create_app(agent_loop, model_name: str = "nanobot", request_timeout: float =
 
     app.router.add_post("/v1/chat/completions", handle_chat_completions)
     app.router.add_get("/v1/models", handle_models)
+    app.router.add_get("/v1/sessions", handle_list_sessions)
+    app.router.add_get("/v1/sessions/{key}/history", handle_session_history)
     app.router.add_get("/health", handle_health)
     return app
