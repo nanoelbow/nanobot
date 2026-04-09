@@ -156,6 +156,7 @@ class SessionManager:
             metadata = {}
             created_at = None
             last_consolidated = 0
+            bad_lines = 0
 
             with open(path, encoding="utf-8") as f:
                 for line in f:
@@ -163,7 +164,11 @@ class SessionManager:
                     if not line:
                         continue
 
-                    data = json.loads(line)
+                    try:
+                        data = json.loads(line)
+                    except json.JSONDecodeError:
+                        bad_lines += 1
+                        continue
 
                     if data.get("_type") == "metadata":
                         metadata = data.get("metadata", {})
@@ -171,6 +176,11 @@ class SessionManager:
                         last_consolidated = data.get("last_consolidated", 0)
                     else:
                         messages.append(data)
+
+            if bad_lines:
+                logger.warning("Session {} had {} corrupted lines (recovered {} messages)", key, bad_lines, len(messages))
+            if not messages and not metadata:
+                return None
 
             return Session(
                 key=key,
@@ -184,21 +194,39 @@ class SessionManager:
             return None
 
     def save(self, session: Session) -> None:
-        """Save a session to disk."""
-        path = self._get_session_path(session.key)
+        """Save a session to disk atomically via temp file + rename."""
+        import os
+        import tempfile
 
-        with open(path, "w", encoding="utf-8") as f:
-            metadata_line = {
-                "_type": "metadata",
-                "key": session.key,
-                "created_at": session.created_at.isoformat(),
-                "updated_at": session.updated_at.isoformat(),
-                "metadata": session.metadata,
-                "last_consolidated": session.last_consolidated
-            }
-            f.write(json.dumps(metadata_line, ensure_ascii=False) + "\n")
-            for msg in session.messages:
-                f.write(json.dumps(msg, ensure_ascii=False) + "\n")
+        path = self._get_session_path(session.key)
+        metadata_line = {
+            "_type": "metadata",
+            "key": session.key,
+            "created_at": session.created_at.isoformat(),
+            "updated_at": session.updated_at.isoformat(),
+            "metadata": session.metadata,
+            "last_consolidated": session.last_consolidated
+        }
+
+        # Write to temp file in same directory for same-filesystem rename
+        dir_path = path.parent
+        dir_path.mkdir(parents=True, exist_ok=True)
+        fd, tmp_path = tempfile.mkstemp(dir=dir_path, suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(json.dumps(metadata_line, ensure_ascii=False) + "\n")
+                for msg in session.messages:
+                    f.write(json.dumps(msg, ensure_ascii=False) + "\n")
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, path)
+        except BaseException:
+            # Clean up temp file on any error (including kill)
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
 
         self._cache[session.key] = session
 
