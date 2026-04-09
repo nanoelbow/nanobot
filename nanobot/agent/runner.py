@@ -63,6 +63,7 @@ class AgentRunSpec:
     context_window_tokens: int | None = None
     context_block_limit: int | None = None
     provider_retry_mode: str = "standard"
+    model_fallback: list[str] | None = None
     progress_callback: Any | None = None
     checkpoint_callback: Any | None = None
 
@@ -325,11 +326,12 @@ class AgentRunner:
         messages: list[dict[str, Any]],
         *,
         tools: list[dict[str, Any]] | None,
+        model_override: str | None = None,
     ) -> dict[str, Any]:
         kwargs: dict[str, Any] = {
             "messages": messages,
             "tools": tools,
-            "model": spec.model,
+            "model": model_override or spec.model,
             "retry_mode": spec.provider_retry_mode,
             "on_retry_wait": spec.progress_callback,
         }
@@ -348,10 +350,48 @@ class AgentRunner:
         hook: AgentHook,
         context: AgentHookContext,
     ):
+        response = await self._call_provider(spec, messages, hook, context, model=spec.model)
+
+        # If primary model errored and fallback models are configured, try them
+        if response.finish_reason == "error" and spec.model_fallback:
+            for fallback_model in spec.model_fallback:
+                if fallback_model == spec.model:
+                    continue  # skip if same as primary
+                logger.warning(
+                    "Model {} failed ({}); trying fallback model {}",
+                    spec.model,
+                    response.finish_reason,
+                    fallback_model,
+                )
+                fallback_response = await self._call_provider(
+                    spec, messages, hook, context, model=fallback_model,
+                )
+                if fallback_response.finish_reason != "error":
+                    return fallback_response
+                logger.warning(
+                    "Fallback model {} also failed ({})",
+                    fallback_model,
+                    fallback_response.finish_reason,
+                )
+                # Keep last error response
+                response = fallback_response
+
+        return response
+
+    async def _call_provider(
+        self,
+        spec: AgentRunSpec,
+        messages: list[dict[str, Any]],
+        hook: AgentHook,
+        context: AgentHookContext,
+        *,
+        model: str,
+    ):
         kwargs = self._build_request_kwargs(
             spec,
             messages,
             tools=spec.tools.get_definitions(),
+            model_override=model,
         )
         if hook.wants_streaming():
             async def _stream(delta: str) -> None:

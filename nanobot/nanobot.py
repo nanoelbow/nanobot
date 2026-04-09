@@ -76,6 +76,7 @@ class Nanobot:
             context_block_limit=defaults.context_block_limit,
             max_tool_result_chars=defaults.max_tool_result_chars,
             provider_retry_mode=defaults.provider_retry_mode,
+            model_fallback=defaults.model_fallback or None,
             web_config=config.tools.web,
             exec_config=config.tools.exec,
             restrict_to_workspace=config.tools.restrict_to_workspace,

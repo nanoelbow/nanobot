@@ -134,6 +134,7 @@ class AgentLoop:
         context_block_limit: int | None = None,
         max_tool_result_chars: int | None = None,
         provider_retry_mode: str = "standard",
+        model_fallback: list[str] | None = None,
         web_config: WebToolsConfig | None = None,
         exec_config: ExecToolConfig | None = None,
         cron_service: CronService | None = None,
@@ -167,6 +168,7 @@ class AgentLoop:
             else defaults.max_tool_result_chars
         )
         self.provider_retry_mode = provider_retry_mode
+        self.model_fallback = model_fallback or defaults.model_fallback or None
         self.web_config = web_config or WebToolsConfig()
         self.exec_config = exec_config or ExecToolConfig()
         self.cron_service = cron_service
@@ -346,6 +348,7 @@ class AgentLoop:
             context_window_tokens=self.context_window_tokens,
             context_block_limit=self.context_block_limit,
             provider_retry_mode=self.provider_retry_mode,
+            model_fallback=self.model_fallback,
             progress_callback=on_progress,
             checkpoint_callback=_checkpoint,
         ))

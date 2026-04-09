@@ -75,6 +75,7 @@ class AgentDefaults(Base):
     max_tool_result_chars: int = 16_000
     provider_retry_mode: Literal["standard", "persistent"] = "standard"
     reasoning_effort: str | None = None  # low / medium / high / adaptive - enables LLM thinking mode
+    model_fallback: list[str] = Field(default_factory=list)  # Models to try when primary fails
     timezone: str = "UTC"  # IANA timezone, e.g. "Asia/Shanghai", "America/New_York"
     dream: DreamConfig = Field(default_factory=DreamConfig)
 
