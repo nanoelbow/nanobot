@@ -144,6 +144,7 @@ class AgentLoop:
         channels_config: ChannelsConfig | None = None,
         timezone: str | None = None,
         hooks: list[AgentHook] | None = None,
+        tool_timeout: int = 120,
     ):
         from nanobot.config.schema import ExecToolConfig, WebToolsConfig
 
@@ -168,6 +169,7 @@ class AgentLoop:
             else defaults.max_tool_result_chars
         )
         self.provider_retry_mode = provider_retry_mode
+        self.tool_timeout = tool_timeout
         self.model_fallback = model_fallback or defaults.model_fallback or None
         self.web_config = web_config or WebToolsConfig()
         self.exec_config = exec_config or ExecToolConfig()
@@ -348,6 +350,7 @@ class AgentLoop:
             context_window_tokens=self.context_window_tokens,
             context_block_limit=self.context_block_limit,
             provider_retry_mode=self.provider_retry_mode,
+            tool_timeout=getattr(self, "tool_timeout", 120),
             model_fallback=self.model_fallback,
             progress_callback=on_progress,
             checkpoint_callback=_checkpoint,

@@ -63,6 +63,7 @@ class AgentRunSpec:
     context_window_tokens: int | None = None
     context_block_limit: int | None = None
     provider_retry_mode: str = "standard"
+    tool_timeout: int = 120  # seconds before a single tool call is killed
     model_fallback: list[str] | None = None
     progress_callback: Any | None = None
     checkpoint_callback: Any | None = None
@@ -352,30 +353,40 @@ class AgentRunner:
     ):
         response = await self._call_provider(spec, messages, hook, context, model=spec.model)
 
-        # If primary model errored and fallback models are configured, try them
-        if response.finish_reason == "error" and spec.model_fallback:
-            for fallback_model in spec.model_fallback:
-                if fallback_model == spec.model:
-                    continue  # skip if same as primary
-                logger.warning(
-                    "Model {} failed ({}); trying fallback model {}",
-                    spec.model,
-                    response.finish_reason,
-                    fallback_model,
-                )
-                fallback_response = await self._call_provider(
-                    spec, messages, hook, context, model=fallback_model,
-                )
-                if fallback_response.finish_reason != "error":
-                    return fallback_response
-                logger.warning(
-                    "Fallback model {} also failed ({})",
-                    fallback_model,
-                    fallback_response.finish_reason,
-                )
-                # Keep last error response
-                response = fallback_response
+        # If primary model succeeded, return immediately
+        if response.finish_reason != "error":
+            return response
 
+        # Primary failed — walk the fallback chain, log summary at the end
+        if not spec.model_fallback:
+            return response
+
+        chain = [spec.model] + [
+            m for m in spec.model_fallback if m != spec.model
+        ]
+        failed = [(spec.model, response.finish_reason)]
+
+        for fallback_model in spec.model_fallback:
+            if fallback_model == spec.model:
+                continue
+            fallback_response = await self._call_provider(
+                spec, messages, hook, context, model=fallback_model,
+            )
+            if fallback_response.finish_reason != "error":
+                logger.info(
+                    "Model fallback chain: {} all failed; {} succeeded",
+                    " → ".join(f"{m}({r})" for m, r in failed),
+                    fallback_model,
+                )
+                return fallback_response
+            failed.append((fallback_model, fallback_response.finish_reason))
+            response = fallback_response
+
+        # Entire chain failed
+        logger.warning(
+            "Model fallback chain exhausted, all failed: {}",
+            " → ".join(f"{m}({r})" for m, r in failed),
+        )
         return response
 
     async def _call_provider(
@@ -502,11 +513,18 @@ class AgentRunner:
                 "detail": prep_error.split(": ", 1)[-1][:120],
             }
             return prep_error + _HINT, event, RuntimeError(prep_error) if spec.fail_on_tool_error else None
+        tool_timeout = getattr(spec, "tool_timeout", 120)
         try:
             if tool is not None:
-                result = await tool.execute(**params)
+                result = await asyncio.wait_for(tool.execute(**params), timeout=tool_timeout)
             else:
-                result = await spec.tools.execute(tool_call.name, params)
+                result = await asyncio.wait_for(spec.tools.execute(tool_call.name, params), timeout=tool_timeout)
+        except asyncio.TimeoutError:
+            timeout_msg = f"Error: Tool '{tool_call.name}' timed out after {tool_timeout}s"
+            event = {"name": tool_call.name, "status": "error", "detail": f"timed out after {tool_timeout}s"}
+            if spec.fail_on_tool_error:
+                return timeout_msg, event, RuntimeError(timeout_msg)
+            return timeout_msg, event, None
         except asyncio.CancelledError:
             raise
         except BaseException as exc:

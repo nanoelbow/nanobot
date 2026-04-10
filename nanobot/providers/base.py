@@ -577,10 +577,11 @@ class LLMProvider(ABC):
         attempt: int,
         persistent: bool,
         on_retry_wait: Callable[[str], Awaitable[None]] | None = None,
+        last_attempt: bool = False,
     ) -> None:
         remaining = max(0.0, delay)
         while remaining > 0:
-            if on_retry_wait:
+            if on_retry_wait and last_attempt:
                 kind = "persistent retry" if persistent else "retry"
                 await on_retry_wait(
                     f"Model request failed, {kind} in {max(1, int(round(remaining)))}s "
@@ -645,18 +646,20 @@ class LLMProvider(ABC):
             if persistent:
                 delay = min(delay, self._PERSISTENT_MAX_DELAY)
 
-            logger.warning(
+            logger.debug(
                 "LLM transient error (attempt {}{}), retrying in {}s: {}",
                 attempt,
                 "+" if persistent and attempt > len(delays) else f"/{len(delays)}",
                 int(round(delay)),
                 (response.content or "")[:120].lower(),
             )
+            is_last = not persistent and attempt >= len(delays)
             await self._sleep_with_heartbeat(
                 delay,
                 attempt=attempt,
                 persistent=persistent,
                 on_retry_wait=on_retry_wait,
+                last_attempt=is_last,
             )
 
         return last_response if last_response is not None else await call(**kw)
