@@ -444,6 +444,14 @@ class AgentLoop:
                     ))
             except asyncio.CancelledError:
                 logger.info("Task cancelled for session {}", msg.session_key)
+                # Clean up stale runtime checkpoint so next message doesn't
+                # restore half-finished tool calls into session history.
+                try:
+                    session = self.sessions.get_or_create(msg.session_key)
+                    self._clear_runtime_checkpoint(session)
+                    self.sessions.save(session)
+                except Exception:
+                    pass
                 raise
             except Exception:
                 logger.exception("Error processing message for session {}", msg.session_key)
